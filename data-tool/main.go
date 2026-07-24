@@ -1,4 +1,4 @@
-// Module for interacting with ASCE Data Tool (a.k.a., ace-dt)
+// Module for interacting with ASCE Data Tool (a.k.a., ace-dt).
 package main
 
 import (
