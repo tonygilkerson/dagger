@@ -185,7 +185,7 @@ func (m *Config) PrepareAll() error {
 		}
 
 		// Prepare Module
-		fmt.Printf("\n----------------------------------------\n")
+		fmt.Printf("----------------------------------------\n")
 		fmt.Printf("Prepare module: %s\n", mod)
 		fmt.Printf("----------------------------------------\n")
 
@@ -212,9 +212,9 @@ func (m *Config) PrepareAll() error {
 	}
 
 	// Summary & Confirmation
-	fmt.Printf("\n==========================\n")
-	fmt.Printf("Summary of Prepared Modules:\n")
-	fmt.Printf("===========================\n")
+	fmt.Printf("\n----------------------------\n")
+	fmt.Printf("Summary of Prepared Modules\n")
+	fmt.Printf("----------------------------\n")
 
 	if len(preparedModules) == 0 {
 		fmt.Println("No modules were bumped.")
@@ -227,10 +227,10 @@ func (m *Config) PrepareAll() error {
 	}
 
 	//
-	// Approve All
+	// Prompt user to continue
 	//
-	if err := m.ApproveAll(preparedModules); err != nil {
-		return err
+	if confirmContinue("approve-all") {
+		return m.ApproveAll(preparedModules)
 	}
 
 	return nil
@@ -266,9 +266,9 @@ func (m *Config) ApproveAll(modules []string) error {
 	}
 
 	// Print Summary
-	fmt.Printf("\n===========================\n")
-	fmt.Printf("Summary of Approved Modules:\n")
-	fmt.Printf("===========================\n")
+	fmt.Printf("\n----------------------------\n")
+	fmt.Printf( "Summary of Approved Modules\n")
+	fmt.Printf("----------------------------\n")
 
 	for _, mod := range approvedModules {
 		versionFile := filepath.Join(m.RootDir, mod, "VERSION")
@@ -288,17 +288,67 @@ func (m *Config) ApproveAll(modules []string) error {
 	return nil
 }
 
-// Stub for PublishAll to satisfy the flow
+// Publish all modules 
 func (m *Config) PublishAll(modules []string) error {
-	fmt.Printf("\nPublishAll called for modules: %v\n", modules)
-	// TODO: Iterate over modules and call m.Publish(mod)
+
+	// Ensure at least one module was provided
+	if len(modules) == 0 {
+		return fmt.Errorf("publish-all requires at least one module")
+	}
+
+	var publishedModules []string
+
+	// Publish each module
+	for _, mod := range modules {
+		versionFile := filepath.Join(m.RootDir, mod, "VERSION")
+        verBytes, err := os.ReadFile(versionFile)
+        if err != nil {
+            return fmt.Errorf("failed to read version file for module '%s' at path %s: %w", mod, versionFile, err)
+        }
+        verStr := strings.TrimSpace(string(verBytes))
+
+		fmt.Printf("\n----------------------------------------\n")
+		fmt.Printf("Publish module: %s (version: %s)\n", mod, verStr)
+		fmt.Printf("----------------------------------------\n")
+
+		if m.DryRun {
+			fmt.Printf("[DRY-RUN] Would have published module: %s\n", mod)
+			publishedModules = append(publishedModules, mod)
+			continue
+		}
+
+		// Call Publish in batch mode (skipPrompt = true)
+		if err := m.Publish(mod); err != nil {
+			return fmt.Errorf("ERROR: publish failed for module %s: %w", mod, err)
+		}
+
+		publishedModules = append(publishedModules, mod)
+	}
+
+	// Print Summary
+	fmt.Printf("\n-----------------------------\n")
+	fmt.Printf("Summary of Published Modules\n")
+	fmt.Printf("-----------------------------\n")
+
+	for _, mod := range publishedModules {
+		versionFile := filepath.Join(m.RootDir, mod, "VERSION")
+		verBytes, err := os.ReadFile(versionFile)
+		if err != nil {
+			return fmt.Errorf("failed to read version file for module '%s' at path %s: %w", mod, versionFile, err)
+		}
+		verStr := strings.TrimSpace(string(verBytes))
+
+		fmt.Printf("  - %s: %s\n", mod, verStr)
+	}
+
+	fmt.Println("\nDone.")
 	return nil
 }
 
 func (m *Config) Prepare(mod string, skipPrompt bool) error {
 
 	// Make sure the module dir exits
-	if !dirExists(fmt.Sprintf("%s/%s", m.RootDir, mod)) {
+	if !dirExists(filepath.Join(m.RootDir, mod)) {
 		return fmt.Errorf("module directory does not exist: %s/%s", m.RootDir, mod)
 	}
 
@@ -423,10 +473,12 @@ func getCommandLineArguments() (string, string, bool ){
 	// DEVTODO - need to finish the usage
 	// Customize the -h / --help output
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <command> [module...]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <command> [module]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  prepare    Prepare target module\n")
-		fmt.Fprintf(os.Stderr, "  approve    Approve target module\n\n")
+		fmt.Fprintf(os.Stderr, "  prepare-all Prepare all modules with changes\n")
+		fmt.Fprintf(os.Stderr, "  prepare     Prepare target module\n")
+		fmt.Fprintf(os.Stderr, "  approve     Approve target module\n")
+		fmt.Fprintf(os.Stderr, "  publish     Approve target module\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
