@@ -264,7 +264,7 @@ prepare() {
       echo "No tests directory found for '$module', skipping tests."
     fi
 
-    dagger call --auto-apply --progress=dots --module="$module" prepare
+    dagger call --auto-apply --module="$module" prepare
 
     # Skip prompt if in batch mode
     version=$(cat "$module/VERSION")

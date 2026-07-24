@@ -2,21 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.11] - 2026-07-24
-
-### 🐛 Bug Fixes
-
-- Test release.go [8825123](https://github.com/act3-ai/dagger/commit/882512353cd17f471ef5c78ee9b603cc6f7cdaa9) by **Tony Gilkerson**
-
-- Test prepare [969de5b](https://github.com/act3-ai/dagger/commit/969de5be969eb78fea7d824a9f94b8e59eb92304) by **Tony Gilkerson**
-
-
-## [0.4.11] - 2026-07-24
-
-### 🐛 Bug Fixes
-
-- Test release.go [8825123](https://github.com/act3-ai/dagger/commit/882512353cd17f471ef5c78ee9b603cc6f7cdaa9) by **Tony Gilkerson**
-
 
 ## [0.4.10] - 2026-06-17
 
