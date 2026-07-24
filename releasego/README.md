@@ -5,5 +5,7 @@
 Example calls.
 
 ```sh
-go run . prepare markdownlint
+
+go run ./releasego/main.go prepare markdownlint
+
 ```
