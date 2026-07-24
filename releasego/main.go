@@ -189,12 +189,6 @@ func (m *Config) PrepareAll() error {
 		fmt.Printf("Prepare module: %s\n", mod)
 		fmt.Printf("----------------------------------------\n")
 
-		if m.DryRun {
-			fmt.Printf("[DRY-RUN] Would have prepared module: %s\n", mod)
-			preparedModules = append(preparedModules, mod)
-			continue
-		}
-
 		// Execute Prepare for the module
 		prepErr := m.Prepare(mod, true)
 
@@ -251,12 +245,6 @@ func (m *Config) ApproveAll(modules []string) error {
 		fmt.Printf("Approve module: %s\n", mod)
 		fmt.Printf("----------------------------------------\n")
 
-		if m.DryRun {
-			fmt.Printf("[DRY-RUN] Would have approved module: %s\n", mod)
-			approvedModules = append(approvedModules, mod)
-			continue
-		}
-
 		// Call Approve in batch mode (skipPrompt = true)
 		if err := m.Approve(mod, true); err != nil {
 			return fmt.Errorf("ERROR: approve failed for module %s: %w", mod, err)
@@ -311,12 +299,6 @@ func (m *Config) PublishAll(modules []string) error {
 		fmt.Printf("Publish module: %s (version: %s)\n", mod, verStr)
 		fmt.Printf("----------------------------------------\n")
 
-		if m.DryRun {
-			fmt.Printf("[DRY-RUN] Would have published module: %s\n", mod)
-			publishedModules = append(publishedModules, mod)
-			continue
-		}
-
 		// Call Publish in batch mode (skipPrompt = true)
 		if err := m.Publish(mod); err != nil {
 			return fmt.Errorf("ERROR: publish failed for module %s: %w", mod, err)
@@ -350,6 +332,12 @@ func (m *Config) Prepare(mod string, skipPrompt bool) error {
 	// Make sure the module dir exits
 	if !dirExists(filepath.Join(m.RootDir, mod)) {
 		return fmt.Errorf("module directory does not exist: %s/%s", m.RootDir, mod)
+	}
+
+	// This is as far as we can go in dry-run mode
+	if m.DryRun {
+		fmt.Printf("[DRY-RUN] Would have ran prepare for module: %s\n", mod)
+		return nil
 	}
 
 	fmt.Printf("Preparing module '%s'...\n", mod)
@@ -415,6 +403,12 @@ func (m *Config) Approve(mod string, skipPrompt bool) error {
 	notesPath := fmt.Sprintf("%s/releases/v%s.md", mod, version)
 	releaseTag := fmt.Sprintf("%s/v%s", mod, version)
 
+	// This is as far as we can go in dry-run mode
+	if m.DryRun {
+		fmt.Printf("[DRY-RUN] Would have ran approve for module: %s\n", mod)
+		return nil
+	}
+
 	// Stage release materials
 	fmt.Printf("Staging release files for %s...\n", mod)
 	if err := runCommand("git", "add", versionFile, changelogPath, notesPath); err != nil {
@@ -452,11 +446,48 @@ func (m *Config) Approve(mod string, skipPrompt bool) error {
 
 // Publish handles publishing the approved modules.
 func (m *Config) Publish(mod string) error {
-
 	fmt.Printf("Publishing module: %s...\n", mod)
 
-	// TODO: Add your publishing logic here (e.g., git push, release tags, artifact uploads)
+	// Make sure the module dir exists
+	moduleDir := filepath.Join(m.RootDir, mod)
+	if !dirExists(moduleDir) {
+		return fmt.Errorf("module directory does not exist: %s", moduleDir)
+	}
 
+	// This is as far as we can go in dry-run mode
+	if m.DryRun {
+		fmt.Printf("[DRY-RUN] Would have ran publish for module: %s\n", mod)
+		return nil
+	}
+
+	// Push branch and associated release tags
+	fmt.Println("Pushing commits and tags to remote...")
+	if err := runCommand("git", "push", "--follow-tags"); err != nil {
+		return fmt.Errorf("git push --follow-tags failed: %w", err)
+	}
+
+	// Read module VERSION file
+	versionFile := filepath.Join(moduleDir, "VERSION")
+	versionBytes, err := os.ReadFile(versionFile)
+	if err != nil {
+		return fmt.Errorf("could not read version file at %s: %w", versionFile, err)
+	}
+	version := strings.TrimSpace(string(versionBytes))
+
+	// Run dagger call release
+	fmt.Printf("Running dagger release for module '%s' at version '%s'...\n", mod, version)
+	daggerArgs := []string{
+		"call",
+		fmt.Sprintf("--module=%s", mod),
+		"release",
+		fmt.Sprintf("--version=%s", version),
+	}
+
+	if err := runCommand("dagger", daggerArgs...); err != nil {
+		return fmt.Errorf("dagger release failed for module %s: %w", mod, err)
+	}
+
+	fmt.Printf("Successfully ran 'dagger release' on module %s\n", mod)
 	return nil
 }
 
@@ -470,7 +501,6 @@ func getCommandLineArguments() (string, string, bool ){
 	//
 	flag.BoolVar(&dryRun, "dry-run", false, "Perform a dry run without applying changes")
 
-	// DEVTODO - need to finish the usage
 	// Customize the -h / --help output
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <command> [module]\n\n", os.Args[0])
