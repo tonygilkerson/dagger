@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+
+update_dag_deps() {
+    local dagger_version="$1"
+
+    # Loop through all immediate subdirs and any tests dir they may contain
+    for dir in */ */tests/; do    
+        # Remove trailing slash
+        mod="${dir%/}"
+        dagger_json_file="$mod/dagger.json"
+
+        # folders that we want to skip
+        if [[ "$mod" =~ ^(bin|\.dagger)$ ]]; then
+            continue
+        fi    
+
+        # dagger.json file is required
+        if [[ ! -f "$dagger_json_file" ]]; then
+            printf "ERROR: dagger.json file for module: %s not found\n" "$mod"
+            exit 1
+        fi
+
+        # Read name and source line-by-line using tab as a delimiter
+        while IFS=$'\t' read -r name source; do
+            if [[ -n "$name" ]]; then
+                printf "Updating dependency: %s (%s) in %s to %s\n" "$name" "$source" "$mod" "$dagger_version"
+                set -x
+                dagger update -m "$mod" "${name}@${dagger_version}"
+                set +x
+            fi
+
+        # Use jq expression to fetch dependencies that starts with "github.com/dagger/dagger"
+        # and return list of: <name>\t<source> 
+        done < <(jq -r '.dependencies[]? | select(.source | startswith("github.com/dagger/dagger")) | "\(.name)\t\(.source)"' "$dagger_json_file")
+    done
+}
+
+function list_modules() {
+  find . -maxdepth 2 -mindepth 2 -type f -name dagger.json -exec dirname {} \; | sed 's|^\./||'
+}
+
+function list_modules_with_tests() {
+  find . -maxdepth 3 -type f -path './*/tests/dagger.json' -exec dirname {} \; | sed 's|^\./||'
+}
+
+function detect_latest_dagger_version() {
+  curl -s https://api.github.com/repos/dagger/dagger/releases/latest | jq -r '.tag_name'
+}
+
+function check_git_status() {
+  local path="${1:-}"
+
+  if [[ -z "$path" ]]; then
+    # No argument provided: check entire repo
+    git status --porcelain
+  else
+    # Argument provided: check only the given path
+    git status --porcelain "$path"
+  fi
+}
+
+
+#update dagger engine to latest version in all modules
+function upgrade_dagger_engine_all() {
+
+  local LATEST_DAGGER_VERSION=$(detect_latest_dagger_version)
+
+  #upgrade dagger engine locally first
+  brew upgrade dagger
+
+  #upgrade dagger engine in all modules
+  dagger develop -r
+
+  # Update dagger modules to the latest dagger version 
+  update_dag_deps $LATEST_DAGGER_VERSION
+
+  #create branch for updates
+  git checkout -b "update_dagger_engine_$LATEST_DAGGER_VERSION"
+
+  changed_files=$(git diff --name-only -- "dagger.json" "**/dagger.json" "**/go.mod" "**/go.sum")
+
+  if [[ -n "$changed_files" ]]; then
+    echo "📦 engine upgrades found in:"
+    echo "$changed_files"
+
+    # Stage all changed files under the module
+    echo "$changed_files" | xargs git add
+
+    # Commit
+    echo "Creating commit: fix: update dagger engine to $LATEST_DAGGER_VERSION"
+    git commit -S -m "fix: update dagger engine to $LATEST_DAGGER_VERSION"
+  else
+    echo "No changed files"
+  fi
+
+}
+
+#find any act3 module updates and update release module with latest
+function upgrade_act3_module_deps() {
+
+  dagger -m ./renovate call \
+    --platform=github \
+    --endpoint-url=https://api.github.com \
+    --project=act3-ai/dagger \
+    --author="$GITHUB_USER" \
+    --email="$GITHUB_EMAIL" \
+    --token=env:GITHUB_TOKEN \
+    --git-private-key=env:GITHUB_PRIVATE_KEY \
+    update
+
+}
+
+#call function
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  if declare -f "$1" >/dev/null; then
+    "$@"
+  else
+    echo "Error: '$1' is not a valid function."
+    echo "Available functions:"
+    declare -F | awk '{print $3}'
+    exit 1
+  fi
+fi
