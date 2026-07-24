@@ -18,9 +18,6 @@ import (
 var ErrNothingToBump = errors.New("there was nothing to bump")
 
 type Config struct {
-	Command   string
-	Modules   []string
-	BatchMode bool
 	DryRun    bool
 	RootDir   string
 }
@@ -28,48 +25,6 @@ type Config struct {
 // Load CLI flags & env vars into the struct
 func NewConfig() *Config {
 	cfg := &Config{}
-
-	// Flags
-	flag.BoolVar(&cfg.BatchMode, "batch", false, "Run in batch mode")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Perform a dry run without applying changes")
-
-	// Customize the -h / --help output
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <command> [module...]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  prepare    Prepare target module(s)\n")
-		fmt.Fprintf(os.Stderr, "  approve    Approve target module(s)\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	// Environment variable fallback
-	cfg.BatchMode = cfg.BatchMode || os.Getenv("BATCH_MODE") == "true"
-	cfg.DryRun = cfg.DryRun || os.Getenv("DRY_RUN") == "true"
-
-	// Grab positional args: args[0] = Command, args[1:] = Modules
-	args := flag.Args()
-
-	if len(args) > 0 {
-		cfg.Command = args[0]
-	}
-	if len(args) > 1 {
-		// Capture all remaining arguments as modules
-		cfg.Modules = args[1:]
-	}
-
-	// Output summary
-	if cfg.Command != "" {
-		fmt.Printf("===================\n")
-		fmt.Printf("Arguments and Flags\n")
-		fmt.Printf("===================\n")
-		fmt.Printf("Command:    %s\n", cfg.Command)
-		fmt.Printf("Modules:    %v\n", cfg.Modules)
-		fmt.Printf("Batch Mode: %v\n", cfg.BatchMode)
-		fmt.Printf("Dry Run:    %v\n", cfg.DryRun)
-		fmt.Printf("===================\n\n")
-	}
 
 	return cfg
 }
@@ -99,32 +54,6 @@ func runCommand(name string, args ...string) error {
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
-
-// Execute a function while redirecting standard output to a custom writer (like MultiWriter)
-func runWithCapturedOutput(w io.Writer, fn func() error) error {
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-
-	r, pipeW, _ := os.Pipe()
-	os.Stdout = pipeW
-	os.Stderr = pipeW
-
-	outDone := make(chan struct{})
-	go func() {
-		io.Copy(w, r)
-		close(outDone)
-	}()
-
-	err := fn()
-
-	pipeW.Close()
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
-	<-outDone
-
-	return err
-}
-
 
 // Check if a directory exists
 func dirExists(path string) bool {
@@ -176,8 +105,8 @@ func hasModuleChanged(module, currentTag string) (bool, error) {
 	return false, nil
 }
 
-func (m *Config) runPrepareDaggerCommand() error {
-	cmd := exec.Command("dagger", "call", "--auto-apply", "--progress=dots", "--module="+m.Modules[0], "prepare")
+func (m *Config) runPrepareDaggerCommand(mod string) error {
+	cmd := exec.Command("dagger", "call", "--auto-apply", "--progress=dots", "--module="+mod, "prepare")
 
 	// Buffer to record the output for string matching
 	var buf bytes.Buffer
@@ -201,11 +130,6 @@ func (m *Config) runPrepareDaggerCommand() error {
 }
 
 func (m *Config) PrepareAll() error {
-
-	// Ensure no module arguments were accidentally passed
-	if len(m.Modules) > 0 {
-		return fmt.Errorf("prepare-all does not accept module arguments, but got: %v", m.Modules)
-	}
 
 	// Fetch git tags
 	fmt.Println("Fetching git tags...")
@@ -240,7 +164,7 @@ func (m *Config) PrepareAll() error {
 		// Require VERSION file inside module folder
 		if !fileExists(versionFile) {
 			return fmt.Errorf("version file missing for module '%s' at path: %s", mod, versionFile)
-		}		
+		}
 
 		// Read version and construct expected tag
 		versionBytes, err := os.ReadFile(versionFile)
@@ -256,12 +180,11 @@ func (m *Config) PrepareAll() error {
 			return fmt.Errorf("[%s] error checking change status: %w", mod, err)
 		}
 		if !changed {
+			fmt.Printf("SKIPPING module: %s, no changes since last release tag\n", mod)
 			continue
 		}
 
-		////////////////////////////////####
 		// Prepare Module
-		////////////////////////////////####
 		fmt.Printf("\n----------------------------------------\n")
 		fmt.Printf("Prepare module: %s\n", mod)
 		fmt.Printf("----------------------------------------\n")
@@ -272,36 +195,26 @@ func (m *Config) PrepareAll() error {
 			continue
 		}
 
-		// Instantiate a sub-config for the single module run in batch mode
-		subCfg := &Config{
-			Command:   "prepare",
-			Modules:   []string{mod},
-			BatchMode: true,
-			DryRun:    m.DryRun,
-		}
-
 		// Execute Prepare for the module
-		prepErr := subCfg.Prepare()
+		prepErr := m.Prepare(mod, true)
 
 		switch {
 		case prepErr == nil:
 			preparedModules = append(preparedModules, mod)
 
 		case errors.Is(prepErr, ErrNothingToBump):
-			fmt.Printf("[%s] Skipping '%s': No changes detected, there was nothing to bump.\n", mod, mod)
+			fmt.Printf("Skipping '%s': No changes detected, there was nothing to bump.\n", mod)
 
 		default:
 			// Real failure: abort pipeline execution immediately
-			return fmt.Errorf("[%s] ERROR: prepare failed: %w", mod, prepErr)
+			return fmt.Errorf("ERROR: prepare failed for module %s: %w", mod, prepErr)
 		}
 	}
 
-	////////////////////////////////####
 	// Summary & Confirmation
-	////////////////////////////////####
-	fmt.Printf("\n===================\n")
+	fmt.Printf("\n==========================\n")
 	fmt.Printf("Summary of Prepared Modules:\n")
-	fmt.Printf("===================\n")
+	fmt.Printf("===========================\n")
 
 	if len(preparedModules) == 0 {
 		fmt.Println("No modules were bumped.")
@@ -313,39 +226,83 @@ func (m *Config) PrepareAll() error {
 		fmt.Printf("  - %s: %s\n", mod, strings.TrimSpace(string(verBytes)))
 	}
 
-	if m.BatchMode {
-		fmt.Println("\nBatch mode enabled, skipping prompt.")
-		return nil
+	//
+	// Approve All
+	//
+	if err := m.ApproveAll(preparedModules); err != nil {
+		return err
 	}
-
-	// DEVTODO
-	// Ask user to continue to approve-all
-	// if confirmContinue("approve-all") {
-	// 	approveCfg := &Config{
-	// 		Command:   "approve-all",
-	// 		Modules:   preparedModules,
-	// 		BatchMode: m.BatchMode,
-	// 		DryRun:    m.DryRun,
-	// 	}
-	// 	return approveCfg.ApproveAll()
-	// }
 
 	return nil
 }
 
-func (m *Config) Prepare() error {
 
-	// Enforce that exactly one module is present
-	if len(m.Modules) != 1 {
-		return fmt.Errorf("prepare requires exactly 1 module, but got %d", len(m.Modules))
+func (m *Config) ApproveAll(modules []string) error {
+	// Ensure at least one module was provided
+	if len(modules) == 0 {
+		return fmt.Errorf("approve-all requires at least one module")
 	}
+
+	var approvedModules []string
+
+	// Approve each module
+	for _, mod := range modules {
+		fmt.Printf("\n----------------------------------------\n")
+		fmt.Printf("Approve module: %s\n", mod)
+		fmt.Printf("----------------------------------------\n")
+
+		if m.DryRun {
+			fmt.Printf("[DRY-RUN] Would have approved module: %s\n", mod)
+			approvedModules = append(approvedModules, mod)
+			continue
+		}
+
+		// Call Approve in batch mode (skipPrompt = true)
+		if err := m.Approve(mod, true); err != nil {
+			return fmt.Errorf("ERROR: approve failed for module %s: %w", mod, err)
+		}
+
+		approvedModules = append(approvedModules, mod)
+	}
+
+	// Print Summary
+	fmt.Printf("\n===========================\n")
+	fmt.Printf("Summary of Approved Modules:\n")
+	fmt.Printf("===========================\n")
+
+	for _, mod := range approvedModules {
+		versionFile := filepath.Join(m.RootDir, mod, "VERSION")
+		verBytes, err := os.ReadFile(versionFile)
+		verStr := "unknown"
+		if err == nil {
+			verStr = strings.TrimSpace(string(verBytes))
+		}
+		fmt.Printf("  - %s: %s\n", mod, verStr)
+	}
+
+	// Prompt user to continue to publish-all
+	if confirmContinue("publish-all") {
+		return m.PublishAll(approvedModules)
+	}
+
+	return nil
+}
+
+// Stub for PublishAll to satisfy the flow
+func (m *Config) PublishAll(modules []string) error {
+	fmt.Printf("\nPublishAll called for modules: %v\n", modules)
+	// TODO: Iterate over modules and call m.Publish(mod)
+	return nil
+}
+
+func (m *Config) Prepare(mod string, skipPrompt bool) error {
 
 	// Make sure the module dir exits
-	if !dirExists(fmt.Sprintf("%s/%s", m.RootDir, m.Modules[0])) {
-		return fmt.Errorf("module directory does not exist: %s/%s", m.RootDir, m.Modules[0])
+	if !dirExists(fmt.Sprintf("%s/%s", m.RootDir, mod)) {
+		return fmt.Errorf("module directory does not exist: %s/%s", m.RootDir, mod)
 	}
 
-	fmt.Printf("Preparing module '%s'...\n", m.Modules[0])
+	fmt.Printf("Preparing module '%s'...\n", mod)
 
 	// git fetch --tags
 	fmt.Println("Fetching git tags...")
@@ -354,23 +311,23 @@ func (m *Config) Prepare() error {
 	}
 
 	// Run module tests only if tests subdirectory exists
-	testsDir := fmt.Sprintf("%s/tests", m.Modules[0])
+	testsDir := fmt.Sprintf("%s/tests", mod)
 	if dirExists(testsDir) {
-		fmt.Printf("Running tests for %s...\n", m.Modules[0])
+		fmt.Printf("Running tests for %s...\n", mod)
 		if err := runCommand("dagger", "-m", testsDir, "checks"); err != nil {
 			return fmt.Errorf("dagger tests failed: %w", err)
 		}
 	} else {
-		fmt.Printf("No tests directory found for '%s', skipping tests.\n", m.Modules[0])
+		fmt.Printf("No tests directory found for '%s', skipping tests.\n", mod)
 	}
 
 	// Run dagger prepare
-	if err := m.runPrepareDaggerCommand(); err != nil {
+	if err := m.runPrepareDaggerCommand(mod); err != nil {
 		return err
 	}
-	
+
 	// Read VERSION file
-	versionFile := fmt.Sprintf("%s/VERSION", m.Modules[0])
+	versionFile := fmt.Sprintf("%s/VERSION", mod)
 	versionBytes, err := os.ReadFile(versionFile)
 	if err != nil {
 		return fmt.Errorf("could not read version file at %s: %w", versionFile, err)
@@ -378,42 +335,38 @@ func (m *Config) Prepare() error {
 	version := strings.TrimSpace(string(versionBytes))
 
 	// Skip prompt if in batch mode
-	if m.BatchMode {
+	if skipPrompt {
 		fmt.Println("Skip prompt, running in batch mode")
 		return nil
 	}
 
 	// Prompt user to continue to approve
-	fmt.Printf("Please review the local changes, especially %s/releases/%s.md\n", m.Modules[0], version)
+	fmt.Printf("Please review the local changes, especially %s/releases/%s.md\n", mod, version)
 	if confirmContinue("approve") {
-		return m.Approve()
+		return m.Approve(mod, skipPrompt)
 	}
 
 	return nil
 }
 
-func (m *Config) Approve() error {
-	// Enforce exactly one module
-	if len(m.Modules) != 1 {
-		return fmt.Errorf("approve requires exactly 1 module, but got %d", len(m.Modules))
-	}
+func (m *Config) Approve(mod string, skipPrompt bool) error {
 
-	fmt.Printf("Approve module '%s'...\n", m.Modules[0])
+	fmt.Printf("Approve module '%s'...\n", mod)
 
 	// Read VERSION file
-	versionFile := fmt.Sprintf("%s/VERSION", m.Modules[0])
+	versionFile := fmt.Sprintf("%s/VERSION", mod)
 	versionBytes, err := os.ReadFile(versionFile)
 	if err != nil {
 		return fmt.Errorf("could not read version file at %s: %w", versionFile, err)
 	}
 	version := strings.TrimSpace(string(versionBytes))
 
-	changelogPath := fmt.Sprintf("%s/CHANGELOG.md", m.Modules[0])
-	notesPath := fmt.Sprintf("%s/releases/v%s.md", m.Modules[0], version)
-	releaseTag := fmt.Sprintf("%s/v%s", m.Modules[0], version)
+	changelogPath := fmt.Sprintf("%s/CHANGELOG.md", mod)
+	notesPath := fmt.Sprintf("%s/releases/v%s.md", mod, version)
+	releaseTag := fmt.Sprintf("%s/v%s", mod, version)
 
 	// Stage release materials
-	fmt.Printf("Staging release files for %s...\n", m.Modules[0])
+	fmt.Printf("Staging release files for %s...\n", mod)
 	if err := runCommand("git", "add", versionFile, changelogPath, notesPath); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
@@ -433,36 +386,90 @@ func (m *Config) Approve() error {
 	}
 
 	// Skip prompt if in batch mode
-	if m.BatchMode {
+	if skipPrompt {
 		fmt.Println("Skip prompt, running in batch mode")
 		return nil
 	}
 
-	// 7. Prompt user to continue to publish step
+	// Prompt user to continue to publish step
 	fmt.Printf("Please review the local changes, especially %s\n", notesPath)
 	if confirmContinue("publish") {
-		return m.Publish() // Assuming you have a Publish method ready for the next step!
+		return m.Publish(mod) // Assuming you have a Publish method ready for the next step!
 	}
 
 	return nil
 }
 
 // Publish handles publishing the approved modules.
-func (m *Config) Publish() error {
-	// 1. Enforce that at least one module is present
-	if len(m.Modules) == 0 {
-		return fmt.Errorf("publish requires at least 1 module")
-	}
+func (m *Config) Publish(mod string) error {
 
-	fmt.Printf("Publishing module(s): %s...\n", strings.Join(m.Modules, ", "))
+	fmt.Printf("Publishing module: %s...\n", mod)
 
 	// TODO: Add your publishing logic here (e.g., git push, release tags, artifact uploads)
 
 	return nil
 }
 
-func main() {
+func getCommandLineArguments() (string, string, bool ){
+	var cmd string     // The command ie prepare, approve, etc...
+	var mod string     // The module name
+	var dryRun bool    // If true will print what is would do
+	
+	//
+	// Get Flags and Arguments
+	//
+	flag.BoolVar(&dryRun, "dry-run", false, "Perform a dry run without applying changes")
 
+	// DEVTODO - need to finish the usage
+	// Customize the -h / --help output
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <command> [module...]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Commands:\n")
+		fmt.Fprintf(os.Stderr, "  prepare    Prepare target module\n")
+		fmt.Fprintf(os.Stderr, "  approve    Approve target module\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	args := flag.Args()
+
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	if len(args) > 1 {
+		// Capture all remaining arguments as modules
+		mod = args[1]
+	}
+
+	//
+	// Validate Flags and Arguments
+	//
+
+	// Must have a command
+	if cmd == "" {
+		fmt.Fprintf(os.Stderr, "Error: command argument is required\n")
+		os.Exit(1)		
+	}
+	
+	// Must have a module for certain commands
+	if cmd == "prepare" || cmd == "approve" || cmd == "publish" {
+		if mod == "" {
+			fmt.Fprintf(os.Stderr, "Error: command %s requires a module argument\n", cmd)
+			os.Exit(1)		
+		}	
+	}
+
+	return cmd, mod, dryRun
+}
+
+func main() {
+	var cmd string     // The command ie prepare, approve, etc...
+	var mod string     // The module name
+	var dryRun bool    // If true will print what is would do
+
+	// Get and validate the command line args and flags
+	cmd, mod, dryRun = getCommandLineArguments()
+	
 	// Run from project root
 	rootProjDir := getRootProjDir()
 	os.Chdir(rootProjDir)
@@ -471,27 +478,29 @@ func main() {
 
 	// Initialize a new configuration struct
 	cfg := NewConfig()
+	cfg.DryRun = dryRun
 	cfg.RootDir = rootProjDir
 
+
 	// Call the right method based on the command
-	switch cfg.Command {
+	switch cmd {
 	case "prepare-all":
 		if err := cfg.PrepareAll(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error during prepare-all: %v\n", err)
 			os.Exit(1)
 		}
 	case "prepare":
-		if err := cfg.Prepare(); err != nil {
+		if err := cfg.Prepare(mod, true); err != nil {
 			fmt.Fprintf(os.Stderr, "Error during prepare: %v\n", err)
 			os.Exit(1)
 		}
 	case "approve":
-		if err := cfg.Approve(); err != nil {
+		if err := cfg.Approve(mod, true); err != nil {
 			fmt.Fprintf(os.Stderr, "Error during approve: %v\n", err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Printf("Unknown or missing command: '%s'\n", cfg.Command)
+		fmt.Printf("Unknown or missing command: '%s'\n", cmd)
 		os.Exit(1)
 	}
 }
