@@ -18,8 +18,8 @@ import (
 var ErrNothingToBump = errors.New("there was nothing to bump")
 
 type Config struct {
-	DryRun    bool
-	RootDir   string
+	DryRun  bool
+	RootDir string
 }
 
 // Load CLI flags & env vars into the struct
@@ -29,84 +29,8 @@ func NewConfig() *Config {
 	return cfg
 }
 
-// Get the directory of the root git project
-// This function assumes the source dir it one level under the root
-// For example:
-//
-//	/path/to/dagger/releasego/main.go will return /path/to/dagger
-func getRootProjDir() string {
-
-	_, currentFilePath, _, ok := runtime.Caller(0)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "Error: could not get current file path\n")
-		os.Exit(1)
-	}
-	// First filepath.Dir strips main.go (gets releasego)
-	// Second filepath.Dir strips releasego (gets dagger)
-	return filepath.Dir(filepath.Dir(currentFilePath))
-}
-
-// Run shell commands and stream output directly to stdout/stderr
-func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	return cmd.Run()
-}
-
-// Check if a directory exists
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return info.IsDir()
-}
-
-// Check if a file exists
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return !info.IsDir()
-}
-
-// Prompt the user
-func confirmContinue(nextAction string) bool {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("\nContinue to '%s'? [y/N]: ", nextAction)
-
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-
-	input = strings.ToLower(strings.TrimSpace(input))
-	return input == "y" || input == "yes"
-}
-
-// check if a module has changed relative to its git tag.
-func hasModuleChanged(module, currentTag string) (bool, error) {
-	// Check if the git tag exists
-	err := exec.Command("git", "rev-parse", "--verify", currentTag).Run()
-	if err != nil {
-		// Tag doesn't exist yet -> module has changed/new
-		return true, nil
-	}
-
-	// Tag exists: check if files in module directory changed since that tag
-	err = exec.Command("git", "diff", "--quiet", currentTag, "HEAD", "--", module).Run()
-	if err != nil {
-		// Exit code 1 means differences exist
-		return true, nil
-	}
-	return false, nil
-}
-
 func (m *Config) runPrepareDaggerCommand(mod string) error {
-	cmd := exec.Command("dagger", "call", "--auto-apply", "--progress=dots", "--module="+mod, "prepare")
+	cmd := exec.Command("dagger", "call", "--auto-apply", "--module="+mod, "prepare")
 
 	// Buffer to record the output for string matching
 	var buf bytes.Buffer
@@ -131,14 +55,14 @@ func (m *Config) runPrepareDaggerCommand(mod string) error {
 
 func (m *Config) PrepareAll() error {
 
+	// Used to hold a list of modules that were prepared
+	var preparedModules []string
+
 	// Fetch git tags
 	fmt.Println("Fetching git tags...")
 	if err := runCommand("git", "fetch", "--tags"); err != nil {
 		return fmt.Errorf("git fetch failed: %w", err)
 	}
-
-	// Used to hold a list of modules that were prepared
-	var preparedModules []string
 
 	// Scan directory for submodules
 	dirs, err := os.ReadDir(m.RootDir)
@@ -146,27 +70,28 @@ func (m *Config) PrepareAll() error {
 		return fmt.Errorf("failed to read root directory: %w", err)
 	}
 
+	//
+	// Rang over sub-dirs and for each sub-module found prepare it for release
+	//
 	for _, dir := range dirs {
 		// Only inspect directories
 		if !dir.IsDir() {
 			continue
 		}
 
-		mod := dir.Name()
-
 		// Skip reserved or hidden folders
+		mod := dir.Name()
 		if mod == "bin" || mod == ".dagger" || mod == "releasego" || strings.HasPrefix(mod, ".") {
 			continue
 		}
 
-		versionFile := fmt.Sprintf("%s/%s", m.RootDir, mod) + "/VERSION"
-
 		// Require VERSION file inside module folder
+		versionFile := fmt.Sprintf("%s/%s", m.RootDir, mod) + "/VERSION"
 		if !fileExists(versionFile) {
 			return fmt.Errorf("version file missing for module '%s' at path: %s", mod, versionFile)
 		}
 
-		// Read version and construct expected tag
+		// Read version and construct current tag
 		versionBytes, err := os.ReadFile(versionFile)
 		if err != nil {
 			return fmt.Errorf("error reading %s: %w", versionFile, err)
@@ -205,7 +130,9 @@ func (m *Config) PrepareAll() error {
 		}
 	}
 
+	//
 	// Summary & Confirmation
+	//
 	fmt.Printf("\n----------------------------\n")
 	fmt.Printf("Summary of Prepared Modules\n")
 	fmt.Printf("----------------------------\n")
@@ -229,7 +156,6 @@ func (m *Config) PrepareAll() error {
 
 	return nil
 }
-
 
 func (m *Config) ApproveAll(modules []string) error {
 	// Ensure at least one module was provided
@@ -255,7 +181,7 @@ func (m *Config) ApproveAll(modules []string) error {
 
 	// Print Summary
 	fmt.Printf("\n----------------------------\n")
-	fmt.Printf( "Summary of Approved Modules\n")
+	fmt.Printf("Summary of Approved Modules\n")
 	fmt.Printf("----------------------------\n")
 
 	for _, mod := range approvedModules {
@@ -276,7 +202,7 @@ func (m *Config) ApproveAll(modules []string) error {
 	return nil
 }
 
-// Publish all modules 
+// Publish all modules
 func (m *Config) PublishAll(modules []string) error {
 
 	// Ensure at least one module was provided
@@ -289,11 +215,11 @@ func (m *Config) PublishAll(modules []string) error {
 	// Publish each module
 	for _, mod := range modules {
 		versionFile := filepath.Join(m.RootDir, mod, "VERSION")
-        verBytes, err := os.ReadFile(versionFile)
-        if err != nil {
-            return fmt.Errorf("failed to read version file for module '%s' at path %s: %w", mod, versionFile, err)
-        }
-        verStr := strings.TrimSpace(string(verBytes))
+		verBytes, err := os.ReadFile(versionFile)
+		if err != nil {
+			return fmt.Errorf("failed to read version file for module '%s' at path %s: %w", mod, versionFile, err)
+		}
+		verStr := strings.TrimSpace(string(verBytes))
 
 		fmt.Printf("\n----------------------------------------\n")
 		fmt.Printf("Publish module: %s (version: %s)\n", mod, verStr)
@@ -334,13 +260,13 @@ func (m *Config) Prepare(mod string, skipPrompt bool) error {
 		return fmt.Errorf("module directory does not exist: %s/%s", m.RootDir, mod)
 	}
 
+	fmt.Printf("Preparing module '%s'...\n", mod)
+
 	// This is as far as we can go in dry-run mode
 	if m.DryRun {
 		fmt.Printf("[DRY-RUN] Would have ran prepare for module: %s\n", mod)
 		return nil
 	}
-
-	fmt.Printf("Preparing module '%s'...\n", mod)
 
 	// git fetch --tags
 	fmt.Println("Fetching git tags...")
@@ -491,11 +417,87 @@ func (m *Config) Publish(mod string) error {
 	return nil
 }
 
-func getCommandLineArguments() (string, string, bool ){
-	var cmd string     // The command ie prepare, approve, etc...
-	var mod string     // The module name
-	var dryRun bool    // If true will print what is would do
-	
+// Get the directory of the root git project
+// This function assumes the source dir is one level under the root
+// For example:
+//
+//	/path/to/dagger/releasego/main.go will return /path/to/dagger
+func getRootProjDir() string {
+
+	_, currentFilePath, _, ok := runtime.Caller(0)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Error: could not get current file path\n")
+		os.Exit(1)
+	}
+	// First filepath.Dir strips main.go (gets releasego)
+	// Second filepath.Dir strips releasego (gets dagger)
+	return filepath.Dir(filepath.Dir(currentFilePath))
+}
+
+// Run shell commands and stream output directly to stdout/stderr
+func runCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+// Check if a directory exists
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return info.IsDir()
+}
+
+// Check if a file exists
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
+}
+
+// Prompt the user
+func confirmContinue(nextAction string) bool {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("\nContinue to '%s'? [y/N]: ", nextAction)
+
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+
+	input = strings.ToLower(strings.TrimSpace(input))
+	return input == "y" || input == "yes"
+}
+
+// check if a module has changed relative to its git tag.
+func hasModuleChanged(module, currentTag string) (bool, error) {
+	// Check if the git tag exists
+	err := exec.Command("git", "rev-parse", "--verify", currentTag).Run()
+	if err != nil {
+		// Tag doesn't exist yet -> module has changed/new
+		return true, nil
+	}
+
+	// Tag exists: check if files in module directory changed since that tag
+	err = exec.Command("git", "diff", "--quiet", currentTag, "HEAD", "--", module).Run()
+	if err != nil {
+		// Exit code 1 means differences exist
+		return true, nil
+	}
+	return false, nil
+}
+
+func getCommandLineArguments() (string, string, bool) {
+	var cmd string  // The command ie prepare, approve, etc...
+	var mod string  // The module name
+	var dryRun bool // If true will print what is would do
+
 	//
 	// Get Flags and Arguments
 	//
@@ -530,39 +532,38 @@ func getCommandLineArguments() (string, string, bool ){
 	// Must have a command
 	if cmd == "" {
 		fmt.Fprintf(os.Stderr, "Error: command argument is required\n")
-		os.Exit(1)		
+		os.Exit(1)
 	}
-	
+
 	// Must have a module for certain commands
 	if cmd == "prepare" || cmd == "approve" || cmd == "publish" {
 		if mod == "" {
 			fmt.Fprintf(os.Stderr, "Error: command %s requires a module argument\n", cmd)
-			os.Exit(1)		
-		}	
+			os.Exit(1)
+		}
 	}
 
 	return cmd, mod, dryRun
 }
 
 func main() {
-	var cmd string     // The command ie prepare, approve, etc...
-	var mod string     // The module name
-	var dryRun bool    // If true will print what is would do
+	var cmd string  // The command ie prepare, approve, etc...
+	var mod string  // The module name
+	var dryRun bool // If true will print what is would do
 
 	// Get and validate the command line args and flags
 	cmd, mod, dryRun = getCommandLineArguments()
-	
+
 	// Run from project root
 	rootProjDir := getRootProjDir()
 	os.Chdir(rootProjDir)
 	fmt.Println("Start release...")
-	fmt.Printf("Ensure we are running from project root, change working directory to=[%s]\n", rootProjDir)
+	fmt.Printf("Working directory:%s\n", rootProjDir)
 
 	// Initialize a new configuration struct
 	cfg := NewConfig()
 	cfg.DryRun = dryRun
 	cfg.RootDir = rootProjDir
-
 
 	// Call the right method based on the command
 	switch cmd {
